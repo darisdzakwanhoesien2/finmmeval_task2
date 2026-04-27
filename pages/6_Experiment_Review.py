@@ -8,6 +8,7 @@ import streamlit as st
 
 from src.research_utils import (
     ERROR_LABELS,
+    build_results_discussion_draft,
     error_label_summary,
     list_experiment_runs,
     load_error_analysis_table,
@@ -41,19 +42,42 @@ metrics = json.loads(metrics_path.read_text(encoding="utf-8")) if metrics_path.e
 report_path = run_dir / "report.md"
 error_table = load_error_analysis_table(run_dir)
 
+
+def redacted_config(payload: dict[str, object]) -> dict[str, object]:
+    redacted = dict(payload)
+    for key in ("token", "api_key", "openrouter_api_key", "hf_token"):
+        if key in redacted and redacted[key]:
+            redacted[key] = "[redacted]"
+    return redacted
+
+
+def filter_options(frame: pd.DataFrame, column: str, fallback: str = "Unspecified") -> list[str]:
+    if column not in frame.columns:
+        return []
+    values = frame[column].fillna(fallback).astype(str).str.strip()
+    values = values.replace("", fallback)
+    return sorted(values.unique().tolist())
+
+
+def normalized_filter_series(frame: pd.DataFrame, column: str, fallback: str = "Unspecified") -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series([fallback] * len(frame), index=frame.index)
+    values = frame[column].fillna(fallback).astype(str).str.strip()
+    return values.replace("", fallback)
+
 meta_cols = st.columns(4)
 meta_cols[0].metric("Rows", len(results))
 meta_cols[1].metric("Model", config.get("model_id", "—"))
 meta_cols[2].metric("Prompt mode", config.get("prompt_mode", "—"))
 meta_cols[3].metric("Provider", config.get("provider", "—"))
 
-tab_summary, tab_breakdowns, tab_predictions, tab_errors, tab_artifacts = st.tabs(
-    ["Summary", "Breakdowns", "Predictions", "Error Analysis", "Artifacts"]
+tab_summary, tab_breakdowns, tab_predictions, tab_errors, tab_paper, tab_artifacts = st.tabs(
+    ["Summary", "Breakdowns", "Predictions", "Error Analysis", "Paper Draft", "Artifacts"]
 )
 
 with tab_summary:
     st.subheader("Run Configuration")
-    st.json(config)
+    st.json(redacted_config(config))
 
     overall = metrics.get("overall", {})
     if overall:
@@ -96,26 +120,38 @@ with tab_predictions:
     if results.empty:
         st.warning("This run has no prediction records.")
     else:
+        display_results = results.copy()
+        display_results["_filter_split"] = normalized_filter_series(display_results, "split")
+        display_results["_filter_company"] = normalized_filter_series(display_results, "company")
+        display_results["_filter_task_category"] = normalized_filter_series(display_results, "task_category")
+        split_options = filter_options(display_results, "_filter_split")
+        company_options = filter_options(display_results, "_filter_company")
+        category_options = filter_options(display_results, "_filter_task_category")
+
         filter_split = st.multiselect(
             "Filter split",
-            options=sorted(results["split"].unique()),
-            default=sorted(results["split"].unique()),
+            options=split_options,
+            default=split_options,
         )
         filter_company = st.multiselect(
             "Filter company",
-            options=sorted(results["company"].unique()),
-            default=sorted(results["company"].unique()),
+            options=company_options,
+            default=company_options,
         )
         filter_category = st.multiselect(
             "Filter task category",
-            options=sorted(results["task_category"].unique()),
-            default=sorted(results["task_category"].unique()),
+            options=category_options,
+            default=category_options,
         )
-        filtered = results[
-            results["split"].isin(filter_split)
-            & results["company"].isin(filter_company)
-            & results["task_category"].isin(filter_category)
+        filtered = display_results[
+            display_results["_filter_split"].isin(filter_split)
+            & display_results["_filter_company"].isin(filter_company)
+            & display_results["_filter_task_category"].isin(filter_category)
         ].copy()
+        filtered = filtered.drop(
+            columns=["_filter_split", "_filter_company", "_filter_task_category"],
+            errors="ignore",
+        )
         st.dataframe(filtered, use_container_width=True, hide_index=True)
 
 with tab_errors:
@@ -160,6 +196,41 @@ with tab_errors:
 
         st.subheader("Labeled Error Summary")
         st.dataframe(error_label_summary(pd.DataFrame(edited)), use_container_width=True, hide_index=True)
+
+with tab_paper:
+    st.subheader("Results and Discussion Generator")
+    st.caption(
+        "Create a paper-ready Markdown draft from the selected run's metrics, breakdowns, predictions, and any saved error labels."
+    )
+
+    draft_path = run_dir / "results_discussion_draft.md"
+    if st.button("Generate Results & Discussion Draft", type="primary", use_container_width=True):
+        draft = build_results_discussion_draft(
+            run_name=run_dir.name,
+            config=redacted_config(config),
+            results=results,
+            metrics=metrics,
+            error_table=error_table,
+        )
+        draft_path.write_text(draft, encoding="utf-8")
+        st.session_state["results_discussion_draft"] = draft
+        st.success(f"Saved draft to `{draft_path}`")
+
+    draft_text = st.session_state.get("results_discussion_draft")
+    if draft_text is None and draft_path.exists():
+        draft_text = draft_path.read_text(encoding="utf-8")
+
+    if draft_text:
+        st.download_button(
+            "Download Markdown Draft",
+            data=draft_text,
+            file_name="results_discussion_draft.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+        st.markdown(draft_text)
+    else:
+        st.info("Click the button above to generate a Results and Discussion draft for this run.")
 
 with tab_artifacts:
     st.subheader("Files")

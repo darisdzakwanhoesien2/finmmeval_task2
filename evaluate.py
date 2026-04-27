@@ -211,6 +211,8 @@ def run_evaluation(
         total = len(rows_to_run)
 
         for processed, (idx, row) in enumerate(rows_to_run, start=1):
+            row = row.copy()
+            row["split"] = split_name
             record = _evaluate_single_row(row=row, config=config)
             all_records.append(record)
 

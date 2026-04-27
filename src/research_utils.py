@@ -677,6 +677,154 @@ def build_run_report(
     return "\n\n".join(["# Experiment Summary", config_md, metrics_md, summary_md])
 
 
+def _format_percent(value: object) -> str:
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _format_score(value: object) -> str:
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return "n/a"
+
+
+def _markdown_table(frame: pd.DataFrame) -> str:
+    if frame.empty:
+        return "No records available."
+
+    display = frame.fillna("").copy()
+    headers = [str(column) for column in display.columns]
+
+    def render_cell(value: object) -> str:
+        if isinstance(value, float):
+            return f"{value:.4f}"
+        return str(value)
+
+    rows = [
+        [render_cell(value) for value in row]
+        for row in display.astype(object).itertuples(index=False, name=None)
+    ]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
+
+
+def _records_table(records: list[dict[str, object]], max_rows: int = 8) -> str:
+    if not records:
+        return "No records available."
+    frame = pd.DataFrame(records).head(max_rows)
+    return _markdown_table(frame)
+
+
+def _safe_config_value(config: dict[str, object], key: str, default: str = "not recorded") -> str:
+    value = config.get(key, default)
+    if value in (None, ""):
+        return default
+    return str(value)
+
+
+def build_results_discussion_draft(
+    *,
+    run_name: str,
+    config: dict[str, object],
+    results: pd.DataFrame,
+    metrics: dict,
+    error_table: pd.DataFrame | None = None,
+) -> str:
+    """Create a paper-oriented Results and Discussion draft from one run."""
+    overall = metrics.get("overall", {}) if isinstance(metrics, dict) else {}
+    by_split = metrics.get("by_split", []) if isinstance(metrics, dict) else []
+    by_category = metrics.get("by_task_category", []) if isinstance(metrics, dict) else []
+    by_company = metrics.get("by_company", []) if isinstance(metrics, dict) else []
+
+    rows = int(overall.get("rows", len(results) if results is not None else 0) or 0)
+    ci = overall.get("bootstrap_ci_penalized_rouge1_f1", [])
+    ci_text = "n/a"
+    if isinstance(ci, list) and len(ci) == 2:
+        ci_text = f"[{_format_score(ci[0])}, {_format_score(ci[1])}]"
+
+    split_values: list[str] = []
+    if results is not None and not results.empty and "split" in results.columns:
+        split_values = [
+            str(value)
+            for value in results["split"].dropna().unique().tolist()
+            if str(value).strip()
+        ]
+    split_note = ""
+    if not split_values:
+        split_note = (
+            "\n\n> Note: this run does not contain saved split labels in `all_predictions.csv`, "
+            "so Easy-vs-Expert claims should be avoided until the evaluation is rerun with split metadata."
+        )
+
+    best_category = by_category[0] if by_category else {}
+    weakest_category = by_category[-1] if by_category else {}
+    best_company = by_company[0] if by_company else {}
+    weakest_company = by_company[-1] if by_company else {}
+
+    error_summary_md = "No manually labeled error-analysis rows are available yet."
+    if error_table is not None and not error_table.empty:
+        summary = error_label_summary(error_table)
+        if not summary.empty:
+            error_summary_md = _markdown_table(summary)
+
+    model = _safe_config_value(config, "model", _safe_config_value(config, "model_id"))
+    provider = _safe_config_value(config, "provider")
+    prompt_mode = _safe_config_value(config, "prompt_mode")
+    temperature = _safe_config_value(config, "temperature")
+    max_tokens = _safe_config_value(config, "max_tokens")
+
+    return f"""# Results and Discussion Draft
+
+Generated from run `{run_name}`.
+
+## Results
+
+The experiment evaluated `{rows}` PolyFiQA predictions using `{model}` through `{provider}` with `{prompt_mode}` prompts, `temperature={temperature}`, and `max_tokens={max_tokens}`. The primary evaluation metric was ROUGE-1 F1, with an additional length-penalized ROUGE-1 score to reflect the task requirement that answers remain within 100 words.
+
+Overall, the model achieved a mean ROUGE-1 F1 of `{_format_score(overall.get("mean_rouge1_f1"))}` and a mean length-penalized ROUGE-1 F1 of `{_format_score(overall.get("mean_penalized_rouge1_f1"))}`. The bootstrap confidence interval for the penalized score was `{ci_text}`. The answer-length compliance rate was `{_format_percent(overall.get("length_compliance_rate"))}`, while the citation-marker rate was `{_format_percent(overall.get("citation_marker_rate"))}` and the mean quote-grounding coverage was `{_format_percent(overall.get("quote_grounding_coverage_mean"))}`.{split_note}
+
+### Breakdown by Split
+
+{_records_table(by_split)}
+
+### Breakdown by Task Category
+
+{_records_table(by_category)}
+
+### Breakdown by Company
+
+{_records_table(by_company)}
+
+## Discussion
+
+The results suggest that answer-format compliance and lexical overlap capture different parts of the system behavior. A high length-compliance rate indicates that the generation setup can respect the short-answer constraint, but the ROUGE-1 scores show how closely the model output matches the expert reference wording. Because PolyFiQA requires cross-lingual evidence grounding across SEC filings and multilingual news, low lexical overlap should be interpreted cautiously: it may reflect genuinely different phrasing, missing evidence, or unsupported reasoning.
+
+The strongest task category in this run was `{best_category.get("task_category", "not available")}` with a mean penalized ROUGE-1 F1 of `{_format_score(best_category.get("mean_penalized_rouge1_f1"))}`. The weakest category was `{weakest_category.get("task_category", "not available")}` with a mean penalized ROUGE-1 F1 of `{_format_score(weakest_category.get("mean_penalized_rouge1_f1"))}`. This gap is useful for the Results section because it identifies where the system is most and least aligned with the reference answers.
+
+At the company level, `{best_company.get("company", "not available")}` had the highest mean penalized score (`{_format_score(best_company.get("mean_penalized_rouge1_f1"))}`), while `{weakest_company.get("company", "not available")}` had the lowest (`{_format_score(weakest_company.get("mean_penalized_rouge1_f1"))}`). These differences may reflect variation in source-document clarity, topic complexity, or how much relevant information appears in multilingual news versus the English filing.
+
+The citation-marker and quote-grounding measures are especially important for PolyFiQA because the benchmark is not only asking for short answers, but also for grounded financial reasoning. If these values are low, the Discussion should state that the model may be producing fluent answers without making evidence use explicit. A stronger final study should pair ROUGE-1 with manual error analysis, especially for unsupported claims, missing multilingual evidence, and incorrect financial comparisons.
+
+### Error Analysis Summary
+
+{error_summary_md}
+
+## Suggested Paper Text
+
+In our PolyFiQA Task 2 experiment, the evaluated model produced concise answers with a length-compliance rate of `{_format_percent(overall.get("length_compliance_rate"))}`. However, the mean length-penalized ROUGE-1 F1 was `{_format_score(overall.get("mean_penalized_rouge1_f1"))}`, indicating limited unigram overlap with expert references. Performance varied across task categories, with `{best_category.get("task_category", "the strongest category")}` outperforming `{weakest_category.get("task_category", "the weakest category")}`. This pattern suggests that the model handles some financial reasoning questions more reliably than others, but still struggles to consistently reproduce reference-grounded analytical answers.
+
+These findings support the central difficulty of PolyFiQA: cross-lingual financial question answering requires more than extracting isolated facts from a single English filing. Strong answers must combine SEC report evidence with multilingual news signals and present the conclusion within a strict word budget. Future improvements should therefore focus on retrieval quality, explicit evidence attribution, and targeted error reduction for multi-document analytical questions.
+"""
+
+
 def load_error_analysis_table(run_dir: Path) -> pd.DataFrame:
     path = run_dir / "error_analysis_template.csv"
     if not path.exists():
