@@ -186,7 +186,7 @@ def run_evaluation(
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-    if not config.token:
+    if config.provider not in {"lmstudio", "lm_studio", "local"} and not config.token:
         raise ValueError("Missing API token.")
 
     run_dir = create_run_dir(config.model, config.run_name)

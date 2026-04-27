@@ -118,7 +118,7 @@ with overview_tab:
 
 with run_tab:
     st.subheader("Run Batch Evaluation")
-    st.caption("Supports both OpenRouter (free/paid/vision) and HuggingFace (free/vision) hosted inference.")
+    st.caption("Supports OpenRouter, HuggingFace, and local LM Studio inference.")
 
     settings_col, help_col = st.columns([1.15, 0.85])
 
@@ -189,10 +189,11 @@ with run_tab:
         st.subheader("Provider Guide")
         st.markdown(
             """
-            | Provider | Free models | Paid models | Vision |
+            | Provider | Free models | Paid models | Local |
             |---|---|---|---|
-            | 🌐 OpenRouter | ✅ (`:free` suffix) | ✅ | ✅ |
-            | 🤗 HuggingFace | ✅ (warm endpoint) | ➖ | ✅ some |
+            | 🌐 OpenRouter | ✅ (`:free` suffix) | ✅ | ➖ |
+            | 🤗 HuggingFace | ✅ (warm endpoint) | ➖ | ➖ |
+            | 💻 LM Studio | ✅ local models | ➖ | ✅ |
 
             Use **Fetch models** in the selector above to pull a live list.
             """
@@ -200,8 +201,8 @@ with run_tab:
         st.caption("Re-click **Run** at any time to resume from the last saved checkpoint.")
 
     if run_button:
-        if not api_key:
-            st.error("Provide an API key first (OpenRouter or HuggingFace).")
+        if provider != "lmstudio" and not api_key:
+            st.error("Provide an API key first, or choose Local LM Studio.")
         else:
             # Reload checkpoint right before running (state may differ from page load)
             existing_records, done_ids = _load_checkpoint(ckpt_path)
@@ -244,7 +245,7 @@ with run_tab:
             try:
                 outcome = run_evaluation(
                     EvaluationConfig(
-                        token=api_key.strip(),
+                        token=api_key.strip() if api_key else "",
                         model=model_id.strip(),
                         provider=provider,
                         hf_provider_hint=hf_provider_hint,
